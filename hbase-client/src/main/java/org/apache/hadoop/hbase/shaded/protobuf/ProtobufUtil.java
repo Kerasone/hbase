@@ -3181,7 +3181,7 @@ public final class ProtobufUtil {
       int prefixLen = ProtobufMagic.lengthOfPBMagic();
       try {
         ZooKeeperProtos.Master rss =
-          ZooKeeperProtos.Master.PARSER.parseFrom(data, prefixLen, data.length - prefixLen);
+          ZooKeeperProtos.Master.parser().parseFrom(data, prefixLen, data.length - prefixLen);
         org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.ServerName sn =
           rss.getMaster();
         return ServerName.valueOf(sn.getHostName(), sn.getPort(), sn.getStartCode());
@@ -3462,6 +3462,7 @@ public final class ProtobufUtil {
         .setQueueTime(slowLogPayload.getQueueTime()).setRegionName(slowLogPayload.getRegionName())
         .setResponseSize(slowLogPayload.getResponseSize())
         .setBlockBytesScanned(slowLogPayload.getBlockBytesScanned())
+        .setFsReadTime(slowLogPayload.getFsReadTime())
         .setServerClass(slowLogPayload.getServerClass()).setStartTime(slowLogPayload.getStartTime())
         .setUserName(slowLogPayload.getUserName())
         .setRequestAttributes(convertNameBytesPairsToMap(slowLogPayload.getRequestAttributeList()))

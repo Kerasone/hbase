@@ -47,6 +47,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionRemoteProcedureBaseState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionRemoteProcedureBaseStateData;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 
 /**
@@ -183,7 +184,20 @@ public abstract class RegionRemoteProcedureBase extends Procedure<MasterProcedur
   // A bit strange but the procedure store will throw RuntimeException if we can not persist the
   // state, so upper layer should take care of this...
   private void persistAndWake(MasterProcedureEnv env, RegionStateNode regionNode) {
-    env.getMasterServices().getMasterProcedureExecutor().getStore().update(this);
+    // The synchronization here is to guard with ProcedureExecutor.executeRollback, as here we will
+    // not hold the procedure execution lock, but we should not persist a procedure in ROLLEDBACK
+    // state to the procedure store.
+    // The ProcedureStore.update must be inside the lock, so here the check for procedure state and
+    // update could be atomic. In ProcedureExecutor.cleanupAfterRollbackOneStep, we will set the
+    // state to ROLLEDBACK, which will hold the same lock too as the Procedure.setState method is
+    // synchronized. This is the key to keep us safe.
+    synchronized (this) {
+      if (getState() == ProcedureState.ROLLEDBACK) {
+        LOG.warn("Procedure {} has already been rolled back, skip persistent", this);
+        return;
+      }
+      env.getMasterServices().getMasterProcedureExecutor().getStore().update(this);
+    }
     regionNode.getProcedureEvent().wake(env.getProcedureScheduler());
   }
 
@@ -284,15 +298,14 @@ public abstract class RegionRemoteProcedureBase extends Procedure<MasterProcedur
   protected Procedure<MasterProcedureEnv>[] execute(MasterProcedureEnv env)
     throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
     RegionStateNode regionNode = getRegionNode(env);
-    if (future == null) {
-      regionNode.lock(this);
+    if (!regionNode.isLockedBy(this)) {
+      regionNode.lock(this, () -> ProcedureFutureUtil.wakeUp(this, env));
     }
     try {
       switch (state) {
         case REGION_REMOTE_PROCEDURE_DISPATCH: {
           // The code which wakes us up also needs to lock the RSN so here we do not need to
-          // synchronize
-          // on the event.
+          // synchronize on the event.
           ProcedureEvent<?> event = regionNode.getProcedureEvent();
           try {
             env.getRemoteDispatcher().addOperationToNode(targetServer, this);

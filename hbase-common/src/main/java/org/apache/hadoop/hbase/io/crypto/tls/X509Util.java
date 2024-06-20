@@ -105,6 +105,15 @@ public final class X509Util {
   public static final String HBASE_SERVER_NETTY_TLS_SUPPORTPLAINTEXT =
     "hbase.server.netty.tls.supportplaintext";
 
+  /**
+   * Set the SSL wrapSize for netty. This is only a maximum wrap size. Buffers smaller than this
+   * will not be consolidated, but buffers larger than this will be split into multiple wrap
+   * buffers. The netty default of 16k is not great for hbase which tends to return larger payloads
+   * than that, meaning most responses end up getting chunked up. This leads to more memory
+   * contention in netty's PoolArena. See https://github.com/netty/netty/pull/13551
+   */
+  public static final String HBASE_SERVER_NETTY_TLS_WRAP_SIZE = "hbase.server.netty.tls.wrapSize";
+  public static final int DEFAULT_HBASE_SERVER_NETTY_TLS_WRAP_SIZE = 1024 * 1024;
   //
   // Client-side specific configs
   //
@@ -290,7 +299,8 @@ public final class X509Util {
    * Adds SslProvider.OPENSSL if OpenSsl is available and enabled. In order to make it available,
    * one must ensure that a properly shaded netty-tcnative is on the classpath. Properly shaded
    * means relocated to be prefixed with "org.apache.hbase.thirdparty" like the rest of the netty
-   * classes.
+   * classes. We make available org.apache.hbase:hbase-openssl as a convenience module which one can
+   * use to pull in a shaded netty-tcnative statically linked against boringssl.
    */
   private static boolean configureOpenSslIfAvailable(SslContextBuilder sslContextBuilder,
     Configuration conf) {

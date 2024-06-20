@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.io;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntConsumer;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
@@ -29,6 +30,7 @@ import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFileInfo;
+import org.apache.hadoop.hbase.io.hfile.HFileReaderImpl;
 import org.apache.hadoop.hbase.io.hfile.HFileScanner;
 import org.apache.hadoop.hbase.io.hfile.ReaderContext;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
@@ -64,6 +66,8 @@ public class HalfStoreFileReader extends StoreFileReader {
 
   private boolean firstKeySeeked = false;
 
+  private AtomicBoolean closed = new AtomicBoolean(false);
+
   /**
    * Creates a half file reader for a hfile referred to by an hfilelink.
    * @param context   Reader context info
@@ -92,7 +96,7 @@ public class HalfStoreFileReader extends StoreFileReader {
   }
 
   @Override
-  public HFileScanner getScanner(final boolean cacheBlocks, final boolean pread,
+  protected HFileScanner getScanner(final boolean cacheBlocks, final boolean pread,
     final boolean isCompaction) {
     final HFileScanner s = super.getScanner(cacheBlocks, pread, isCompaction);
     return new HFileScanner() {
@@ -106,24 +110,10 @@ public class HalfStoreFileReader extends StoreFileReader {
       }
 
       @Override
-      public String getKeyString() {
-        if (atEnd) return null;
-
-        return delegate.getKeyString();
-      }
-
-      @Override
       public ByteBuffer getValue() {
         if (atEnd) return null;
 
         return delegate.getValue();
-      }
-
-      @Override
-      public String getValueString() {
-        if (atEnd) return null;
-
-        return delegate.getValueString();
       }
 
       @Override
@@ -297,7 +287,7 @@ public class HalfStoreFileReader extends StoreFileReader {
       return super.getLastKey();
     }
     // Get a scanner that caches the block and that uses pread.
-    HFileScanner scanner = getScanner(true, true);
+    HFileScanner scanner = getScanner(true, true, false);
     try {
       if (scanner.seekBefore(this.splitCell)) {
         return Optional.ofNullable(scanner.getKey());
@@ -348,5 +338,43 @@ public class HalfStoreFileReader extends StoreFileReader {
   public long getFilterEntries() {
     // Estimate the number of entries as half the original file; this may be wildly inaccurate.
     return super.getFilterEntries() / 2;
+  }
+
+  /**
+   * Overrides close method to handle cache evictions for the referred file. If evictionOnClose is
+   * true, we will seek to the block containing the splitCell and evict all blocks from offset 0 up
+   * to that block offset if this is a bottom half reader, or the from the split block offset up to
+   * the end of the file if this is a top half reader.
+   * @param evictOnClose true if it should evict the file blocks from the cache.
+   */
+  @Override
+  public void close(boolean evictOnClose) throws IOException {
+    if (closed.compareAndSet(false, true)) {
+      if (evictOnClose) {
+        final HFileReaderImpl.HFileScannerImpl s =
+          (HFileReaderImpl.HFileScannerImpl) super.getScanner(false, true, false);
+        final String reference = this.reader.getHFileInfo().getHFileContext().getHFileName();
+        final String referred = StoreFileInfo.getReferredToRegionAndFile(reference).getSecond();
+        s.seekTo(splitCell);
+        if (s.getCurBlock() != null) {
+          long offset = s.getCurBlock().getOffset();
+          LOG.trace("Seeking to split cell in reader: {} for file: {} top: {}, split offset: {}",
+            this, reference, top, offset);
+          ((HFileReaderImpl) reader).getCacheConf().getBlockCache().ifPresent(cache -> {
+            int numEvictedReferred = top
+              ? cache.evictBlocksRangeByHfileName(referred, offset, Long.MAX_VALUE)
+              : cache.evictBlocksRangeByHfileName(referred, 0, offset);
+            int numEvictedReference = cache.evictBlocksByHfileName(reference);
+            LOG.trace(
+              "Closing reference: {}; referred file: {}; was top? {}; evicted for referred: {};"
+                + "evicted for reference: {}",
+              reference, referred, top, numEvictedReferred, numEvictedReference);
+          });
+        }
+        reader.close(false);
+      } else {
+        reader.close(evictOnClose);
+      }
+    }
   }
 }
